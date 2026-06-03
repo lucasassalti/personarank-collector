@@ -31,8 +31,9 @@ function consolidateLiveMatch(snapshots) {
   const gameData = lastSnapshot.gameData ?? {};
   const allPlayers = Array.isArray(lastSnapshot.allPlayers) ? lastSnapshot.allPlayers : [];
   const events = collectEvents(orderedSnapshots);
+  const lcuContext = chooseLastUsefulLcuContext(orderedSnapshots);
 
-  validateEligibleMatch({ gameData, allPlayers, events });
+  validateEligibleMatch({ gameData, allPlayers, events, lcuContext });
 
   const winningTeamId = inferWinningTeamId({
     events,
@@ -60,19 +61,20 @@ function consolidateLiveMatch(snapshots) {
       firstCapturedAt: firstSnapshot.capturedAt ?? null,
       lastCapturedAt: lastSnapshot.capturedAt ?? null,
       gameData,
+      lcuContext,
       events,
     },
   };
 }
 
-function validateEligibleMatch({ gameData, allPlayers, events }) {
+function validateEligibleMatch({ gameData, allPlayers, events, lcuContext }) {
   if (!isSummonersRift(gameData)) {
     throw new Error(`Ignorada: mapa nao e Summoner's Rift (${gameData.mapName ?? 'desconhecido'}).`);
   }
 
-  if (!isCustomGameCandidate({ gameData, allPlayers })) {
+  if (!isCustomGameCandidate({ gameData, lcuContext })) {
     throw new Error(
-      `Ignorada: partida nao parece personalizada (${gameData.gameType ?? gameData.gameMode ?? 'desconhecido'}).`,
+      `Ignorada: partida nao parece personalizada (${formatCustomEvidence({ gameData, lcuContext })}).`,
     );
   }
 
@@ -96,12 +98,22 @@ function isSummonersRift(gameData) {
   return summonersRiftNames.has(mapName) || mapNumber === 11;
 }
 
-function isCustomGameCandidate({ gameData, allPlayers }) {
+function isCustomGameCandidate({ gameData, lcuContext }) {
   const gameType = String(gameData.gameType ?? '').toUpperCase();
   const gameMode = String(gameData.gameMode ?? '').toUpperCase();
   const queueName = String(gameData.queueName ?? '').toUpperCase();
+  const queueId = readQueueId(gameData);
+  const lcuQueueId = readQueueId(lcuContext ?? {});
 
-  if (allPlayers.length === 10 && isSummonersRift(gameData) && (gameType === 'CLASSIC' || gameMode === 'CLASSIC')) {
+  if (queueId !== null) {
+    return queueId === 0;
+  }
+
+  if (lcuQueueId !== null) {
+    return lcuQueueId === 0;
+  }
+
+  if (lcuContext?.available && lcuContext.isCustom === true) {
     return true;
   }
 
@@ -111,6 +123,27 @@ function isCustomGameCandidate({ gameData, allPlayers }) {
     gameMode.includes('CUSTOM') ||
     gameType === 'CUSTOM_GAME'
   );
+}
+
+function readQueueId(gameData) {
+  const value = gameData?.queueId ?? gameData?.queueID ?? gameData?.queue_id;
+  if (value === undefined || value === null || value === '') {
+    return null;
+  }
+
+  const queueId = Number(value);
+  return Number.isFinite(queueId) ? queueId : null;
+}
+
+function formatCustomEvidence({ gameData, lcuContext }) {
+  return [
+    `queueId=${readQueueId(gameData) ?? 'unknown'}`,
+    `gameType=${gameData.gameType ?? 'unknown'}`,
+    `gameMode=${gameData.gameMode ?? 'unknown'}`,
+    `lcuCustom=${lcuContext?.isCustom ?? 'unknown'}`,
+    `lcuQueueId=${readQueueId(lcuContext ?? {}) ?? 'unknown'}`,
+    `lcuPhase=${lcuContext?.phase ?? 'unknown'}`,
+  ].join(', ');
 }
 
 function inferWinningTeamId({ events, allPlayers, activePlayer }) {
@@ -193,6 +226,13 @@ function chooseLastUsefulSnapshot(snapshots) {
   return [...snapshots]
     .reverse()
     .find((snapshot) => Array.isArray(snapshot.allPlayers) && snapshot.allPlayers.length > 0) ?? snapshots.at(-1);
+}
+
+function chooseLastUsefulLcuContext(snapshots) {
+  return [...snapshots]
+    .reverse()
+    .map((snapshot) => snapshot.lcuContext)
+    .find((context) => context?.available) ?? null;
 }
 
 function collectEvents(snapshots) {

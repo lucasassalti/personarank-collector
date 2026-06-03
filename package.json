@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "start": "node src/index.js",
-    "check": "node --check src/index.js"
+    "check": "node --check src/index.js",
+    "release:win": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/create-windows-release.ps1"
   },
   "engines": {
     "node": ">=18"

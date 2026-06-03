@@ -1,6 +1,7 @@
 import { env } from './env.js';
 import { fetchLiveGameData } from './live_client.js';
 import { hasFinalGameEvent, tryConsolidateLiveMatch } from './live_match_consolidator.js';
+import { fetchLcuContext } from './lcu_client.js';
 import { sendMatch } from './match_sender.js';
 
 const maxConsecutiveFailuresInSession = 3;
@@ -13,6 +14,7 @@ let sampleCount = 0;
 let matchSentForCurrentSession = false;
 let cooldownUntil = 0;
 let stopping = false;
+let latestLcuContext = null;
 
 process.on('SIGINT', () => {
   stopping = true;
@@ -23,6 +25,7 @@ process.on('SIGINT', () => {
 
 console.log('PersonaRank Collector iniciado.');
 console.log(`Live Client: ${env.liveClientUrl}`);
+console.log(env.lcuContextEnabled ? 'LCU context: habilitado.' : 'LCU context: desabilitado.');
 console.log('Snapshots serao mantidos apenas em memoria durante a partida.');
 console.log(
   env.backendMatchEndpoint
@@ -32,6 +35,7 @@ console.log(
 
 while (!stopping) {
   try {
+    latestLcuContext = await readLatestLcuContext(latestLcuContext);
     const payload = await fetchLiveGameData(env.liveClientUrl);
     consecutiveFailures = 0;
 
@@ -53,6 +57,7 @@ while (!stopping) {
       sessionId: activeSession.sessionId,
       collectorName: env.collectorName,
       payload,
+      lcuContext: latestLcuContext,
     });
 
     firstSnapshot ??= snapshot;
@@ -79,6 +84,7 @@ while (!stopping) {
 
     if (!activeSession) {
       console.log(`Aguardando partida ativa... (${error.message})`);
+      latestLcuContext = await readLatestLcuContext(latestLcuContext);
     }
 
     await sleep(activeSession ? env.pollIntervalMs : env.idleIntervalMs);
@@ -150,6 +156,7 @@ function createSnapshot({ sessionId, collectorName, payload }) {
     activePlayer: payload?.activePlayer ?? null,
     allPlayers: payload?.allPlayers ?? [],
     events: payload?.events?.Events ?? [],
+    lcuContext: latestLcuContext,
     raw: payload,
   };
 }
@@ -171,12 +178,53 @@ function formatGameInfo(payload) {
   const events = Array.isArray(payload?.events?.Events) ? payload.events.Events.length : 0;
 
   return [
+    `queueId=${gameData.queueId ?? gameData.queueID ?? gameData.queue_id ?? 'unknown'}`,
     `gameType=${gameData.gameType ?? 'unknown'}`,
     `gameMode=${gameData.gameMode ?? 'unknown'}`,
     `map=${gameData.mapName ?? gameData.mapNumber ?? gameData.mapId ?? 'unknown'}`,
     `players=${players}`,
     `events=${events}`,
+    formatLcuInfo(latestLcuContext),
   ].join(' | ');
+}
+
+async function readLatestLcuContext(previousContext) {
+  if (!env.lcuContextEnabled) {
+    return previousContext;
+  }
+
+  try {
+    const context = await fetchLcuContext({
+      lockfilePath: env.lcuLockfilePath,
+    });
+    return context.available && isUsefulLcuContext(context) ? context : previousContext;
+  } catch {
+    return previousContext;
+  }
+}
+
+function isUsefulLcuContext(context) {
+  return (
+    context.isCustom === true ||
+    context.queueId !== null ||
+    context.mapId !== null ||
+    context.teamSize !== null ||
+    Boolean(context.phase)
+  );
+}
+
+function formatLcuInfo(context) {
+  if (!context?.available) {
+    return 'lcu=unknown';
+  }
+
+  return [
+    `lcuCustom=${context.isCustom}`,
+    `lcuQueueId=${context.queueId ?? 'unknown'}`,
+    `lcuMapId=${context.mapId ?? 'unknown'}`,
+    `lcuTeamSize=${context.teamSize ?? 'unknown'}`,
+    `lcuPhase=${context.phase ?? 'unknown'}`,
+  ].join(' ');
 }
 
 function sleep(ms) {

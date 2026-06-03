@@ -5,7 +5,9 @@ import { fileURLToPath } from 'node:url';
 const srcDir = path.dirname(fileURLToPath(import.meta.url));
 const collectorDir = path.resolve(srcDir, '..');
 
-loadEnvFile(path.join(collectorDir, '.env'));
+for (const envPath of getEnvFileCandidates()) {
+  loadEnvFile(envPath);
+}
 
 export const env = {
   collectorName: process.env.COLLECTOR_NAME ?? 'local-player',
@@ -13,6 +15,8 @@ export const env = {
     process.env.LIVE_CLIENT_URL ?? 'https://127.0.0.1:2999/liveclientdata/allgamedata',
   pollIntervalMs: readNumber('POLL_INTERVAL_MS', 5000),
   idleIntervalMs: readNumber('IDLE_INTERVAL_MS', 10000),
+  lcuContextEnabled: readBoolean('LCU_CONTEXT_ENABLED', true),
+  lcuLockfilePath: process.env.LCU_LOCKFILE_PATH ?? '',
   backendMatchEndpoint:
     process.env.BACKEND_MATCH_ENDPOINT ?? 'https://personatracker420-api.onrender.com/api/manual-matches',
 };
@@ -40,9 +44,26 @@ function loadEnvFile(filePath) {
   }
 }
 
+function getEnvFileCandidates() {
+  const candidates = [
+    path.join(process.cwd(), '.env'),
+    path.join(collectorDir, '.env'),
+  ];
+
+  return [...new Set(candidates)];
+}
+
 function readNumber(name, fallback) {
   const value = Number(process.env[name] ?? fallback);
   return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+function readBoolean(name, fallback) {
+  const value = String(process.env[name] ?? '').trim().toLowerCase();
+  if (!value) {
+    return fallback;
+  }
+  return !['0', 'false', 'no', 'off'].includes(value);
 }
 
 function stripQuotes(value) {
