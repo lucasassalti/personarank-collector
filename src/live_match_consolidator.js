@@ -109,12 +109,12 @@ function isCustomGameCandidate({ gameData, lcuContext }) {
     return queueId === 0;
   }
 
-  if (lcuQueueId !== null) {
-    return lcuQueueId === 0;
-  }
-
   if (lcuContext?.available && lcuContext.isCustom === true) {
     return true;
+  }
+
+  if (lcuQueueId !== null) {
+    return lcuQueueId === 0;
   }
 
   return (
