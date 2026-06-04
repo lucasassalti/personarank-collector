@@ -111,10 +111,12 @@ Partida enviada ao backend: ...
 O coletor so envia a partida quando:
 
 - A partida terminou com evento final detectado.
+- Se o evento final nao vier, o coletor tambem aceita quando a Live Client fica indisponivel apos uma partida com pelo menos 15 minutos. Nesse caso, o vencedor e inferido pelo placar do ultimo snapshot: primeiro por kills do time, depois por ouro em caso de empate.
 - A partida tem 10 jogadores.
 - O mapa e Summoner's Rift.
-- A Live Client ou a LCU indica `queueId=0`, quando esse campo existe.
-- Se o `queueId` nao vier, a LCU pode validar a partida com `isCustom=true` ou `customGameLobby`.
+- A Live Client indica `queueId=0`, quando esse campo existe.
+- Se a Live Client nao trouxer `queueId`, a LCU pode validar a partida com `isCustom=true` ou `customGameLobby`.
+- Se a LCU nao trouxer `isCustom=true`, `lcuQueueId=0` tambem e aceito.
 - Se nem Live Client nem LCU trouxerem contexto, o coletor aceita apenas campos explicitamente custom, como `gameType`, `gameMode` ou `queueName` contendo `CUSTOM`.
 - A duracao nao parece remake ou abandono muito curto.
 

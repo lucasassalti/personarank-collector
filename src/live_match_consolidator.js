@@ -1,10 +1,11 @@
 const summonersRiftNames = new Set(["summoner's rift", 'summoners rift']);
 const minimumFinishedGameSeconds = 300;
+const minimumFinishedGameSecondsWithoutFinalEvent = 900;
 
-export function tryConsolidateLiveMatch(snapshots) {
+export function tryConsolidateLiveMatch(snapshots, options = {}) {
   try {
     return {
-      match: consolidateLiveMatch(snapshots),
+      match: consolidateLiveMatch(snapshots, options),
       skippedReason: null,
     };
   } catch (error) {
@@ -20,7 +21,7 @@ export function hasFinalGameEvent(snapshot) {
   return events.some((event) => isGameEndEvent(event) || isNexusKillEvent(event));
 }
 
-function consolidateLiveMatch(snapshots) {
+function consolidateLiveMatch(snapshots, options = {}) {
   if (!Array.isArray(snapshots) || snapshots.length === 0) {
     throw new Error('Nenhum snapshot capturado.');
   }
@@ -32,13 +33,24 @@ function consolidateLiveMatch(snapshots) {
   const allPlayers = Array.isArray(lastSnapshot.allPlayers) ? lastSnapshot.allPlayers : [];
   const events = collectEvents(orderedSnapshots);
   const lcuContext = chooseLastUsefulLcuContext(orderedSnapshots);
+  const durationSeconds = Math.max(1, Math.round(Number(gameData.gameTime ?? lastSnapshot.gameTime ?? 0)));
+  const hasFinalEvent = events.some((event) => isGameEndEvent(event) || isNexusKillEvent(event));
+  const allowMissingFinalEvent = Boolean(options.allowMissingFinalEvent);
 
-  validateEligibleMatch({ gameData, allPlayers, events, lcuContext });
+  validateEligibleMatch({
+    gameData,
+    allPlayers,
+    lcuContext,
+    durationSeconds,
+    hasFinalEvent,
+    allowMissingFinalEvent,
+  });
 
-  const winningTeamId = inferWinningTeamId({
+  const { winningTeamId, inference: winningTeamInference } = inferWinningTeamId({
     events,
     allPlayers,
     activePlayer: lastSnapshot.activePlayer,
+    allowScoreFallback: allowMissingFinalEvent && !hasFinalEvent,
   });
   const teams = buildTeams({ allPlayers, winningTeamId });
   const gameId = normalizeGameId(inferGameId({ firstSnapshot, gameData }));
@@ -50,7 +62,7 @@ function consolidateLiveMatch(snapshots) {
     map: gameData.mapName ?? "Summoner's Rift",
     queue: gameData.gameType ?? 'CUSTOM_GAME',
     playedAt: firstSnapshot.capturedAt ?? new Date().toISOString(),
-    durationSeconds: Math.max(1, Math.round(Number(gameData.gameTime ?? lastSnapshot.gameTime ?? 0))),
+    durationSeconds,
     winningTeamId,
     notes: `Consolidado automaticamente dos snapshots da sessao ${firstSnapshot.sessionId ?? 'desconhecida'}.`,
     teams,
@@ -60,6 +72,10 @@ function consolidateLiveMatch(snapshots) {
       snapshotCount: orderedSnapshots.length,
       firstCapturedAt: firstSnapshot.capturedAt ?? null,
       lastCapturedAt: lastSnapshot.capturedAt ?? null,
+      hasFinalEvent,
+      missingFinalEventAccepted: !hasFinalEvent && allowMissingFinalEvent,
+      finalizationReason: options.finalizationReason ?? null,
+      winningTeamInference,
       gameData,
       lcuContext,
       events,
@@ -67,7 +83,14 @@ function consolidateLiveMatch(snapshots) {
   };
 }
 
-function validateEligibleMatch({ gameData, allPlayers, events, lcuContext }) {
+function validateEligibleMatch({
+  gameData,
+  allPlayers,
+  lcuContext,
+  durationSeconds,
+  hasFinalEvent,
+  allowMissingFinalEvent,
+}) {
   if (!isSummonersRift(gameData)) {
     throw new Error(`Ignorada: mapa nao e Summoner's Rift (${gameData.mapName ?? 'desconhecido'}).`);
   }
@@ -82,13 +105,20 @@ function validateEligibleMatch({ gameData, allPlayers, events, lcuContext }) {
     throw new Error(`Ignorada: partida nao e 5x5, jogadores encontrados: ${allPlayers.length}.`);
   }
 
-  if (!events.some((event) => isGameEndEvent(event) || isNexusKillEvent(event))) {
-    throw new Error('Ignorada: partida sem evento final de jogo.');
-  }
-
-  const durationSeconds = Number(gameData.gameTime ?? 0);
   if (!Number.isFinite(durationSeconds) || durationSeconds < minimumFinishedGameSeconds) {
     throw new Error('Ignorada: duracao muito curta, possivel remake/abandono.');
+  }
+
+  if (!hasFinalEvent) {
+    if (!allowMissingFinalEvent) {
+      throw new Error('Ignorada: partida sem evento final de jogo.');
+    }
+
+    if (durationSeconds < minimumFinishedGameSecondsWithoutFinalEvent) {
+      throw new Error(
+        `Ignorada: partida sem evento final e duracao abaixo de ${minimumFinishedGameSecondsWithoutFinalEvent}s.`,
+      );
+    }
   }
 }
 
@@ -146,31 +176,74 @@ function formatCustomEvidence({ gameData, lcuContext }) {
   ].join(', ');
 }
 
-function inferWinningTeamId({ events, allPlayers, activePlayer }) {
+function inferWinningTeamId({ events, allPlayers, activePlayer, allowScoreFallback = false }) {
   const gameEndEvent = [...events].reverse().find(isGameEndEvent);
   const explicitWinner = teamIdFromValue(
     gameEndEvent?.WinningTeam ?? gameEndEvent?.winningTeam ?? gameEndEvent?.Winner ?? gameEndEvent?.winner,
   );
   if (explicitWinner) {
-    return explicitWinner;
+    return { winningTeamId: explicitWinner, inference: 'gameEndEvent' };
   }
 
   const result = String(gameEndEvent?.Result ?? gameEndEvent?.result ?? '').toUpperCase();
   if (result === 'WIN' || result === 'LOSE' || result === 'LOSS') {
     const activeTeamId = inferActivePlayerTeamId({ activePlayer, allPlayers });
     if (activeTeamId) {
-      return result === 'WIN' ? activeTeamId : oppositeTeamId(activeTeamId);
+      return {
+        winningTeamId: result === 'WIN' ? activeTeamId : oppositeTeamId(activeTeamId),
+        inference: 'activePlayerResult',
+      };
     }
   }
 
   const nexusKillEvent = [...events].reverse().find(isNexusKillEvent);
   const killerName = nexusKillEvent?.KillerName ?? nexusKillEvent?.killerName;
   const killer = allPlayers.find((player) => playerNameMatches(player, killerName));
-  if (killer?.team) {
-    return teamIdFromValue(killer.team);
+  const killerTeamId = teamIdFromValue(killer?.team);
+  if (killerTeamId) {
+    return { winningTeamId: killerTeamId, inference: 'nexusKillEvent' };
+  }
+
+  if (allowScoreFallback) {
+    return {
+      winningTeamId: inferWinningTeamIdByScore(allPlayers),
+      inference: 'teamScoreFallback',
+    };
   }
 
   throw new Error('Nao foi possivel inferir quem venceu.');
+}
+
+function inferWinningTeamIdByScore(allPlayers) {
+  const scores = new Map([
+    [100, { kills: 0, gold: 0 }],
+    [200, { kills: 0, gold: 0 }],
+  ]);
+
+  for (const player of allPlayers) {
+    const teamId = teamIdFromValue(player.team);
+    if (!teamId) {
+      continue;
+    }
+
+    const playerScores = player.scores ?? {};
+    const score = scores.get(teamId);
+    score.kills += Number(playerScores.kills ?? player.kills ?? 0);
+    score.gold += Number(playerScores.gold ?? player.gold ?? 0);
+  }
+
+  const blue = scores.get(100);
+  const red = scores.get(200);
+
+  if (blue.kills !== red.kills) {
+    return blue.kills > red.kills ? 100 : 200;
+  }
+
+  if (blue.gold !== red.gold) {
+    return blue.gold > red.gold ? 100 : 200;
+  }
+
+  throw new Error('Nao foi possivel inferir quem venceu pelo placar.');
 }
 
 function buildTeams({ allPlayers, winningTeamId }) {

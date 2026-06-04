@@ -97,13 +97,22 @@ async function finalizeCurrentSession(reason) {
   }
 
   const snapshots = firstSnapshot === latestSnapshot ? [latestSnapshot] : [firstSnapshot, latestSnapshot].filter(Boolean);
-  const { match, skippedReason } = tryConsolidateLiveMatch(snapshots);
+  const allowMissingFinalEvent = reason === 'Live Client indisponivel apos partida';
+  const { match, skippedReason } = tryConsolidateLiveMatch(snapshots, {
+    allowMissingFinalEvent,
+    finalizationReason: reason,
+  });
 
   if (match && !matchSentForCurrentSession) {
     try {
       await sendMatch(env.backendMatchEndpoint, match);
       matchSentForCurrentSession = true;
       console.log(`Partida enviada ao backend: ${match.gameId}`);
+      if (match.metadata?.missingFinalEventAccepted) {
+        console.log(
+          `Partida aceita sem evento final por tempo de jogo. Vencedor inferido por: ${match.metadata.winningTeamInference}.`,
+        );
+      }
     } catch (error) {
       console.warn(`Falha ao enviar partida ao backend: ${error.message}`);
     }
